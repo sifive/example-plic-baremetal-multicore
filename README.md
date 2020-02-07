@@ -1,0 +1,2 @@
+# example-plic-baremetal-multicore
+This example demonstrates how to enable and service global interrupts on designs that contain a Platform Level Interrupt Controller (PLIC).  It can be used on single or multicore designs.  The functionality for multicore designs is based on a standard core U54-MC or U74-MC, where there are 5 harts, and hart 0 has only Machine interrupts and no Supervisor interrupts and harts 1-4 have both Machine and Supervisor interrupts.    
