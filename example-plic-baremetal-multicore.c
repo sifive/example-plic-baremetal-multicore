@@ -78,11 +78,15 @@
 #endif
 
 /* These offsets generated manually for internal PLIC offsets */
-#define PLIC_HART_THRESHOLD_OFFSET              0x1000
-#define PLIC_HARTx_OFFSET                       0x100
+#define PLIC_HARTx_BASE_OFFSET                      0x2000  // hart 1 and above
+#define PLIC_CONTEXT_OFFSET                         0x1000  // could be any S or M context
+#define PLIC_HARTx_ENABLE_OFFSET                    0x100
 #define PLIC_REGWIDTH                           0x4
 
-/* The PLIC enable groupings are based on a "context", as defined by the PLIC Spec:
+#define PLIC_HART0_ENABLE_BASE_ADDR                         0x0
+#define PLIC_HART1_ENABLE_BASE_ADDR                         0x80
+
+/* The PLIC configurations are based on a "context", as defined by the PLIC Spec:
  * https://github.com/riscv/riscv-plic-spec/blob/master/riscv-plic.adoc#memory-map
  * SiFive U-series standard multi-core designs contain hart0 as only having
  * one context, which is Machine mode, since it is an S-series core without MMU.
@@ -90,17 +94,22 @@
  * Here, we define the hart1 base address as the starting point for *each* hart
  * containing two contexts.
  */
-#define PLIC_HART0_ENABLE_BASE_ADDR             0x0
-#define PLIC_HART1_ENABLE_BASE_ADDR             0x80
+#define PLIC_HART0_THRESHOLD_BASE_ADDR                      (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_THRESHOLD)
+#define PLIC_HART1_THRESHOLD_BASE_ADDR                      (PLIC_HART0_THRESHOLD_BASE_ADDR + PLIC_CONTEXT_OFFSET)
+#define PLIC_HARTx_M_MODE_THRESHOLD_BASE_ADDR(mhartid)      (PLIC_HART1_THRESHOLD_BASE_ADDR + ((mhartid-1) * PLIC_HARTx_BASE_OFFSET))
+#define PLIC_HARTx_S_MODE_THRESHOLD_BASE_ADDR(mhartid)      PLIC_HARTx_M_MODE_THRESHOLD_BASE_ADDR(mhartid) + PLIC_CONTEXT_OFFSET
+
+#define PLIC_HART0_CLAIM_COMPLETE_BASE_ADDR                     (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_CLAIM)
+#define PLIC_HART1_CLAIM_COMPLETE_BASE_ADDR                     (PLIC_HART0_CLAIM_COMPLETE_BASE_ADDR + PLIC_CONTEXT_OFFSET)
+#define PLIC_HARTx_M_MODE_CLAIM_COMPLETE_BASE_ADDR(mhartid)     (PLIC_HART1_CLAIM_COMPLETE_BASE_ADDR + ((mhartid-1) * PLIC_HARTx_BASE_OFFSET))
+#define PLIC_HARTx_S_MODE_CLAIM_COMPLETE_BASE_ADDR(mhartid)     (PLIC_HARTx_M_MODE_CLAIM_COMPLETE_BASE_ADDR(mhartid) + PLIC_CONTEXT_OFFSET)
 
 /* Check bsp/metal-platform.h for defined base addresses for your design */
 #define PLIC_BASE_ADDR                          METAL_RISCV_PLIC0_0_BASE_ADDRESS
 #define PLIC_PRIORITY_ADDR(plic_int)            (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_PRIORITY_BASE + (PLIC_REGWIDTH * plic_int))
 #define PLIC_PENDING_BASE_ADDR                  (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_PENDING_BASE)
 #define PLIC_ENABLE_BASE_ADDR                   (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_ENABLE_BASE)
-#define PLIC_ENABLE_SUPERVISOR_BASE_ADDR        (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_ENABLE_BASE + PLIC_HARTx_OFFSET)
-#define PLIC_THRESHOLD_ADDR(mhartid)            (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_THRESHOLD + (mhartid * PLIC_HART_THRESHOLD_OFFSET))
-#define PLIC_CLAIM_COMPLETE_ADDR(mhartid)       (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_CLAIM + (mhartid * PLIC_HARTx_OFFSET))
+#define PLIC_ENABLE_SUPERVISOR_BASE_ADDR        (PLIC_BASE_ADDR + METAL_RISCV_PLIC0_ENABLE_BASE + PLIC_HARTx_BASE_OFFSET)
 
 /* different interrupt types for enables */
 #define MACHINE_INTS                            0x31
@@ -112,6 +121,8 @@ void plic_enable_disable(uint32_t int_id, uint32_t en_dis, uint32_t hartid, uint
 uint32_t plic_read_pending (uint32_t int_id);
 void plic_set_priority (uint32_t int_id, uint32_t priority);
 void plic_clear_pending (uint32_t int_id);
+uintptr_t plic_get_threshold_base (uint32_t hartid, uint32_t m_or_s);
+uintptr_t plic_get_claim_complete_base (uint32_t hartid, uint32_t m_or_s);
 int global_external_lines_default(int idx);
 void interrupt_global_enable (void);
 void interrupt_global_disable (void);
@@ -181,7 +192,7 @@ uint32_t secondary_main() {
 uint32_t main() {
 
     uint32_t i, priority_thresh, mode;
-    uintptr_t mtvec_base, my_hartid, boot_hart;
+    uintptr_t mtvec_base, my_hartid, boot_hart, plic_addr;
 
     /* Write mstatus.mie = 0 to disable all machine interrupts for this hart
      * prior to setup */
@@ -286,8 +297,10 @@ uint32_t main() {
      * each hart since each hart has its own threshold register.
      */
     priority_thresh = 0x1;
-    write_word(PLIC_THRESHOLD_ADDR(read_csr(mhartid)), priority_thresh);
-    i = read_word(PLIC_THRESHOLD_ADDR(read_csr(mhartid)));
+    plic_addr = plic_get_threshold_base (my_hartid, MACHINE_INTS);
+
+    write_word(plic_addr, priority_thresh);
+    i = read_word(plic_addr);
     if (i != priority_thresh) {
         printf ("Priority Threshold Value Not Written Correctly for CPU %d!\n", read_csr(mhartid));
         printf ("Read: 0x%8x, Expected: 0x%8x\n", i, priority_thresh);
@@ -314,7 +327,11 @@ uint32_t main() {
 #endif
     }
 
-    /* print message from each hart */
+#ifdef UART_PRESENT
+    /* enable interrupts on UART0 to see if the printf() triggers an interrupt.
+     * If it does, the hart will hit external_handler during the printf statement */
+    write_word((METAL_SIFIVE_UART0_0_BASE_ADDRESS + METAL_SIFIVE_UART0_IE), 0x3);
+#endif
     metal_lock_take(&my_lock);
     printf ("Hi! This is CPU %d\n", read_csr(mhartid));
     fflush(stdout);
@@ -338,6 +355,54 @@ uint32_t main() {
     return 0;
 }
 
+uintptr_t plic_get_threshold_base (uint32_t hartid, uint32_t m_or_s) {
+
+    if ((hartid == 0) && (m_or_s == MACHINE_INTS)) {
+
+        /* Hart 0 */
+        return PLIC_HART0_THRESHOLD_BASE_ADDR;
+
+    }
+    else if (m_or_s == MACHINE_INTS) {
+
+        /* Hart 1 and above */
+        return PLIC_HARTx_M_MODE_THRESHOLD_BASE_ADDR(hartid);
+    }
+    else if (m_or_s == SUPERVISOR_INTS) {
+
+        /* Hart 1 and above */
+        return PLIC_HARTx_S_MODE_THRESHOLD_BASE_ADDR(hartid);
+    }
+    else {
+        printf ("Not a valid threshold configuration! Check setup!\n");
+        return 0;
+    }
+}
+
+uintptr_t plic_get_claim_complete_base (uint32_t hartid, uint32_t m_or_s) {
+
+    if ((hartid == 0) && (m_or_s == MACHINE_INTS)) {
+
+        /* Hart 0 */
+        return PLIC_HART0_CLAIM_COMPLETE_BASE_ADDR;
+
+    }
+    else if (m_or_s == MACHINE_INTS) {
+
+        /* Hart 1 and above */
+        return PLIC_HARTx_M_MODE_CLAIM_COMPLETE_BASE_ADDR(hartid);
+    }
+    else if (m_or_s == SUPERVISOR_INTS) {
+
+        /* Hart 1 and above */
+        return PLIC_HARTx_S_MODE_CLAIM_COMPLETE_BASE_ADDR(hartid);
+    }
+    else {
+        printf ("Not a valid claim-complete configuration! Check setup!\n");
+        return 0;
+    }
+}
+
 /* Enable or disable a PLIC interrupt on a given hart.
  * One enable bit per interrupt, 32 enable bits per register.
  * Each hart (CPU) has its own enable register block, and this
@@ -358,12 +423,12 @@ void plic_enable_disable (uint32_t int_id, uint32_t en_dis, uint32_t hartid, uin
     }
     else if  (m_or_s == MACHINE_INTS) {
         plic_enable_addr = PLIC_ENABLE_BASE_ADDR + PLIC_HART1_ENABLE_BASE_ADDR;
-        plic_enable_addr += ((hartid - 1) * PLIC_HARTx_OFFSET);
+        plic_enable_addr += ((hartid - 1) * PLIC_HARTx_ENABLE_OFFSET);
         plic_enable_addr += (PLIC_REGWIDTH * reg);
     }
     else if (m_or_s == SUPERVISOR_INTS) {
         plic_enable_addr = PLIC_ENABLE_SUPERVISOR_BASE_ADDR;
-        plic_enable_addr += ((hartid - 1) * PLIC_HARTx_OFFSET);
+        plic_enable_addr += ((hartid - 1) * PLIC_HARTx_ENABLE_OFFSET);
         plic_enable_addr += (PLIC_REGWIDTH * reg);
     }
     else {
@@ -441,14 +506,15 @@ void plic_set_priority (uint32_t int_id, uint32_t priority) {
  */
 void __attribute__((weak, interrupt)) external_handler (void) {
 
-    uintptr_t hartid = read_csr(mhartid);
+    uintptr_t cc_base_addr, hartid = read_csr(mhartid);
     uint32_t max_pending_timeout = 0x400, still_pending = TRUE;
     uint32_t claim_complete_id;
 
     while ((still_pending == TRUE) && (max_pending_timeout != 0)) {
 
         /* read PLIC claim register */
-        claim_complete_id = read_word(PLIC_CLAIM_COMPLETE_ADDR(hartid));
+        cc_base_addr = plic_get_claim_complete_base (hartid, MACHINE_INTS);
+        claim_complete_id = read_word(cc_base_addr);
 
         if (claim_complete_id != 0) {
             /* Call interrupt specific software function (Or call s/w table function here) */
@@ -472,7 +538,7 @@ void __attribute__((weak, interrupt)) external_handler (void) {
 
         if (claim_complete_id != 0) {
             /* write it back to complete interrupt */
-            write_word(PLIC_CLAIM_COMPLETE_ADDR(hartid), claim_complete_id);
+            write_word(cc_base_addr, claim_complete_id);
         }
     } /* while ((still_pending == TRUE) && (max_pending_timeout != 0)) */
 
